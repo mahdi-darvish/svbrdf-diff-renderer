@@ -51,11 +51,11 @@ if False:
 # MaterialGAN only support 256x256, so `res` in optim_ganlatent(_, res, _, _, _, _) should always be 256
 # For higher resolution, we optimize 256x256 maps by MaterialGAN first, than use the scale 2x output as the initialization of 512x512 maps
 if True:
-    optim_ganlatent(material_dir / "optim_latent_256.json", 256, 0.02, [1000, 10, 10], tex_init="auto")
-    optim_perpixel(material_dir / "optim_pixel_256_to_512.json", 512, 0.01, 20, tex_init="textures")
-    optim_perpixel(material_dir / "optim_pixel_512_to_1024.json", 1024, 0.01, 20, tex_init="textures")
+    optim_ganlatent(material_dir / "optim_latent_256.json", 256, 0.02, [10, 10, 10], tex_init="auto")
+    # optim_perpixel(material_dir / "optim_pixel_256_to_512.json", 512, 0.01, 20, tex_init="textures")
+    # optim_perpixel(material_dir / "optim_pixel_512_to_1024.json", 1024, 0.01, 20, tex_init="textures")
 
 
 # Generate novel views with environment map
-if True:
+if False:
     render_envmap(material_dir / "optim_latent/1024", 256)

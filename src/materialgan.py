@@ -171,6 +171,7 @@ class MaterialGANOptim(Optim):
         self.textures = textures
         self.loss = loss.item()
         self.loss_image = loss_image.item()
+        th.save(self.latent, 'final_latent.pt')
 
     def _download_checkpoint(self, ckp_path, url):
         """Download the checkpoint if it doesn't exist."""
