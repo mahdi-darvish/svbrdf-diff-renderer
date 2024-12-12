@@ -1,268 +1,344 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright (c) 2024, Yu Guo. All rights reserved.
+# python 3.7
+"""Contains the generator class of StyleGAN2.
 
-import os
+This class is derived from the `BaseGenerator` class defined in
+`base_generator.py`.
+"""
+
 import numpy as np
-import torch as th
-import tqdm
-import requests
+
 import torch
-from pathlib import Path
-from datetime import datetime
-from torchvision.utils import save_image
-from .descriptor import VGGLoss
-from .globalvar import init_global_noise
-from . import globalvar
-from .optimization import Optim
-from .higan_models.stylegan2_generator import StyleGAN2Generator
-from .imageio import imread, imwrite, img9to1, tex4to1
-# We use the generator of StyleGAN2 from higan (https://github.com/genforce/higan)
+
+from .base_generator import BaseGenerator
+from .stylegan2_generator_network import StyleGAN2GeneratorNet
+
+__all__ = ['StyleGAN2Generator']
 
 
-class MaterialGANOptim(Optim):
-    def __init__(self, device, renderer_obj, ckp):
-        super().__init__(device, renderer_obj)
+class StyleGAN2Generator(BaseGenerator):
+  """Defines the generator class of StyleGAN2.
 
-        self.init_download_ckp()
+  Same as StyleGAN, StyleGAN2 also has Z space, W space, and W+ (WP) space.
+  """
 
-        self.net_obj = StyleGAN2Generator('MaterialGAN', ckp)
+  def __init__(self, model_name, logger=None):
+    super().__init__(model_name, logger)
+    assert self.gan_type == 'stylegan2'
 
-        self.loss_large_feature = VGGLoss(device, np.array([1, 1, 4, 8])/14)
-        for p in self.loss_large_feature.parameters():
-            p.requires_grad = False
+  def build(self):
+    self.w_space_dim = 512
+    self.g_architecture_type = 'skip'
+    self.fused_modulate = True
+    self.truncation_psi = 1.0
+    self.truncation_layers = 18
+    self.randomize_noise = False
+    self.net = StyleGAN2GeneratorNet(
+        resolution=self.resolution,
+        z_space_dim=self.z_space_dim,
+        w_space_dim=self.w_space_dim,
+        image_channels=self.image_channels,
+        architecture_type=self.g_architecture_type,
+        fused_modulate=self.fused_modulate,
+        truncation_psi=self.truncation_psi,
+        truncation_layers=self.truncation_layers,
+        randomize_noise=self.randomize_noise)
+    self.num_layers = self.net.num_layers
+    self.model_specific_vars = ['truncation.truncation']
 
-        self.loss_small_feature = VGGLoss(device, np.array([8, 8, 2, 1])/19)
-        for p in self.loss_small_feature.parameters():
-            p.requires_grad = False
+  def convert_tf_weights(self, test_num=10):
+    # pylint: disable=import-outside-toplevel
+    import sys
+    import pickle
+    import warnings
+    warnings.filterwarnings('ignore', category=FutureWarning)
+    import tensorflow as tf
+    tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+    # pylint: enable=import-outside-toplevel
 
-    def init_download_ckp(self):
-        ckp = "ckp/materialgan.pth"
-        if not os.path.exists(ckp):
-            url = "https://huggingface.co/tflsguoyu/MaterialGAN/resolve/main/materialgan.pth"
-            self._download_checkpoint(ckp, url)        
+    sess = tf.compat.v1.InteractiveSession()
 
-        ckp = "ckp/latent_avg_W+_256.pt"
-        if not os.path.exists(ckp):
-            url = "https://huggingface.co/tflsguoyu/MaterialGAN/resolve/main/latent_avg_W+_256.pt"
-            self._download_checkpoint(ckp, url)        
+    self.logger.info(f'Loading tf weights from `{self.tf_weight_path}`.')
+    self.check_attr('tf_code_path')
+    sys.path.insert(0, self.tf_code_path)
+    with open(self.tf_weight_path, 'rb') as f:
+      _, _, tf_net = pickle.load(f)  # G, D, Gs
+    sys.path.pop(0)
+    self.logger.info(f'Successfully loaded!')
 
-        ckp = "ckp/latent_const_N_256.pt"
-        if not os.path.exists(ckp):
-            url = "https://huggingface.co/tflsguoyu/MaterialGAN/resolve/main/latent_const_N_256.pt"
-            self._download_checkpoint(ckp, url)        
+    self.logger.info(f'Converting tf weights to pytorch version.')
+    tf_vars = dict(tf_net.__getstate__()['variables'])
+    tf_vars.update(
+        dict(tf_net.components.mapping.__getstate__()['variables']))
+    tf_vars.update(
+        dict(tf_net.components.synthesis.__getstate__()['variables']))
+    state_dict = self.net.state_dict()
+    for pth_var_name, tf_var_name in self.net.pth_to_tf_var_mapping.items():
+      assert tf_var_name in tf_vars
+      assert pth_var_name in state_dict
+      self.logger.debug(f'  Converting `{tf_var_name}` to `{pth_var_name}`.')
+      var = torch.from_numpy(np.array(tf_vars[tf_var_name]))
+      if 'weight' in pth_var_name:
+        if 'fc' in pth_var_name:
+          var = var.permute(1, 0)
+        elif 'conv' in pth_var_name:
+          var = var.permute(3, 2, 0, 1)
+      state_dict[pth_var_name] = var
+    self.logger.info(f'Successfully converted!')
 
-        ckp = "ckp/latent_const_W+_256.pt"
-        if not os.path.exists(ckp):
-            url = "https://huggingface.co/tflsguoyu/MaterialGAN/resolve/main/latent_const_W+_256.pt"
-            self._download_checkpoint(ckp, url)        
+    self.logger.info(f'Saving pytorch weights to `{self.weight_path}`.')
+    for var_name in self.model_specific_vars:
+      del state_dict[var_name]
+    torch.save(state_dict, self.weight_path)
+    self.logger.info(f'Successfully saved!')
 
-    def init_from(self, ckp):
-        # initialize latent W+
-        if len(ckp) == 0:
-            latent_z = th.randn(1, 512).to(self.device)
-            latent_w = self.net_obj.net.mapping(latent_z)
-            latent = self.net_obj.net.truncation(latent_w)
-        else:
-            latent = th.load(ckp[0], map_location=self.device, weights_only=True)
-        self.latent = self.gradient(latent)
+    self.load()
 
-        # initialize noise
-        # return gloval var "noises"
-        if len(ckp) == 2:
-            init_global_noise(self.device, init_from=ckp[1])
-        elif len(ckp) == 1:
-            init_global_noise(self.device, init_from="avg")
-        else:
-            init_global_noise(self.device, init_from="random")
+    # Start testing if needed.
+    if test_num <= 0 or not tf.test.is_built_with_cuda():
+      self.logger.warning(f'Skip testing the weights converted from tf model!')
+      sess.close()
+      return
+    self.logger.info(f'Testing conversion results.')
+    self.net.eval().to(self.run_device)
+    total_distance = 0.0
+    for i in range(test_num):
+      latent_code = self.easy_sample(1)
+      tf_output = tf_net.run(latent_code,  # latents_in
+                             None,  # labels_in
+                             truncation_psi=self.truncation_psi,
+                             truncation_cutoff=self.truncation_layers,
+                             randomize_noise=self.randomize_noise)
+      pth_output = self.synthesize(latent_code)['image']
+      distance = np.average(np.abs(tf_output - pth_output))
+      self.logger.debug(f'  Test {i:03d}: distance {distance:.6e}.')
+      total_distance += distance
+    self.logger.info(f'Average distance is {total_distance / test_num:.6e}.')
 
-    def load_targets(self, targets):
-        self.targets = targets
-        self.loss_large_feature.load(targets)
-        self.loss_small_feature.load(targets)
+    sess.close()
 
-    def compute_feature_loss(self, predicts, flag):
-        if flag == "L":
-            return self.loss_large_feature(predicts)
-        elif flag == "N":
-            return self.loss_small_feature(predicts)
-        else:
-            print("[ERROR:MaterialGANOptim] To compute feature loss, a flag is needed, 'L' or 'N'")
-            exit()
+  def sample(self, num, latent_space_type='z', **kwargs):
+    """Samples latent codes randomly.
 
-    def th_to_np(self, arr):
-        return arr.detach().cpu().numpy()
+    Args:
+      num: Number of latent codes to sample. Should be positive.
+      latent_space_type: Type of latent space from which to sample latent code.
+        Only [`z`, `w`, `wp`] are supported. Case insensitive. (default: `z`)
 
-    def reconstruct_normal(self, texture):
-        normal_x  = texture[:, 0, :, :].clamp(-1, 1)
-        normal_y  = texture[:, 1, :, :].clamp(-1, 1)
-        normal_xy = (normal_x**2 + normal_y**2).clamp(0, 1)
-        normal_z  = (1 - normal_xy).sqrt()
-        normal    = th.stack((normal_x, normal_y, normal_z), 1)
-        return normal / (normal.norm(2.0, 1, keepdim=True))
+    Returns:
+      A `numpy.ndarray` as sampled latend codes.
 
-    def latent_to_textures(self, latent):
-        # Create a folder to save RGB images
-        output_folder = "final_rgb_images"
-        os.makedirs(output_folder, exist_ok=True)
-        textures_tmp = self.net_obj.net.synthesis(latent)
-        # Paths to the .pt files for w1 and w2.
-        w1_file_path = 'w1.pt'
-        w2_file_path = 'w2.pt'
+    Raises:
+      ValueError: If the given `latent_space_type` is not supported.
+    """
+    latent_space_type = latent_space_type.lower()
+    if latent_space_type == 'z':
+      latent_codes = np.random.randn(num, self.z_space_dim)
+    elif latent_space_type in ['w', 'wp']:
+      z = self.easy_sample(num, latent_space_type='z')
+      latent_codes = []
+      for inputs in self.get_batch_inputs(z, self.ram_size):
+        outputs = self.easy_synthesize(latent_codes=inputs,
+                                       latent_space_type='z',
+                                       generate_style=False,
+                                       generate_image=False)
+        latent_codes.append(outputs[latent_space_type])
+      latent_codes = np.concatenate(latent_codes, axis=0)
+      if latent_space_type == 'w':
+        assert latent_codes.shape == (num, self.w_space_dim)
+      elif latent_space_type == 'wp':
+        assert latent_codes.shape == (num, self.num_layers, self.w_space_dim)
+    else:
+      raise ValueError(f'Latent space type `{latent_space_type}` is invalid!')
 
-        # Load the latent vectors.
-        w1 = self.net_obj.load_latent_vectors(w1_file_path)
-        w2 = self.net_obj.load_latent_vectors(w2_file_path)
+    return latent_codes.astype(np.float32)
 
-        # Ensure the latent vectors are on the same device as the generator.
-        w1 = w1.to(self.net_obj.run_device)
-        w2 = w2.to(self.net_obj.run_device)
-        w1 = w1.detach().cpu().numpy()
-        w2 = w2.detach().cpu().numpy()
-        # Generate interpolated images.
-        interpolated_images = self.net_obj.synthesize_interpolated(w1, w2, steps=10)
+  def preprocess(self, latent_codes, latent_space_type='z', **kwargs):
+    """Preprocesses the input latent code if needed.
 
-        # Save or display the images.
-        for i, img in enumerate(interpolated_images):
-            img_tensor = torch.from_numpy(img).float()
+    Args:
+      latent_codes: The input latent codes for preprocessing.
+      latent_space_type: Type of latent space to which the latent codes belong.
+        Only [`z`, `w`, `wp`] are supported. Case insensitive. (default: `z`)
 
-            # Save the image
-            diffuse_th = (img_tensor[:, 0:3, :, :] + 1) / 2
-            normal_th = img_tensor[:, 3:5, :, :]
-            roughness_th = (img_tensor[:, 5, :, :] + 1) / 2
-            specular_th = (img_tensor[:, 6:9, :, :] + 1) / 2
-            normal_th = self.reconstruct_normal(normal_th)
+    Returns:
+      The preprocessed latent codes which can be used as final input for the
+        generator.
 
-            normal = self.th_to_np(normal_th.squeeze().permute(1, 2, 0))
-            diffuse = self.th_to_np(diffuse_th.squeeze().permute(1, 2, 0))
-            specular = self.th_to_np(specular_th.squeeze().permute(1, 2, 0))
-            roughness = self.th_to_np(roughness_th.squeeze())
+    Raises:
+      ValueError: If the given `latent_space_type` is not supported.
+    """
+    if not isinstance(latent_codes, np.ndarray):
+      raise ValueError(f'Latent codes should be with type `numpy.ndarray`!')
 
-            final_rgb = (diffuse + specular) / 2  # Example: average combination
-            final_rgb = final_rgb.clip(0, 1)  # Ensure values are in the valid range [0, 1]
+    latent_space_type = latent_space_type.lower()
+    if latent_space_type == 'z':
+      latent_codes = latent_codes.reshape(-1, self.z_space_dim)
+      norm = np.linalg.norm(latent_codes, axis=1, keepdims=True)
+      latent_codes = latent_codes / norm * np.sqrt(self.z_space_dim)
+    elif latent_space_type == 'w':
+      latent_codes = latent_codes.reshape(-1, self.w_space_dim)
+    elif latent_space_type == 'wp':
+      latent_codes = latent_codes.reshape(-1, self.num_layers, self.w_space_dim)
+    else:
+      raise ValueError(f'Latent space type `{latent_space_type}` is invalid!')
 
+    return latent_codes.astype(np.float32)
 
-            print(f"[DONE:SvbrdfIO] Saving textures for image {i + 1}")
-            imwrite(normal, f"normal_{i + 1}.png", "normal")
-            imwrite(diffuse, f"diffuse_{i + 1}.png", "srgb")
-            imwrite(specular, f"specular_{i + 1}.png", "srgb")
-            imwrite(roughness, f"roughness_{i + 1}.png", "rough")
+  def _synthesize(self,
+                  latent_codes,
+                  latent_space_type='z',
+                  generate_style=False,
+                  generate_image=True):
+    """Synthesizes images with given latent codes.
 
-            # Save the final RGB image in the output folder
-            rgb_output_path = os.path.join(output_folder, f"rgb_{i + 1}.png")
-            imwrite(final_rgb, rgb_output_path, "srgb")
-        # Option 1:
-        # self.textures = textures.clamp(-1,1)
-        # Option 2:
-        textures = textures_tmp.clone()
-        textures[:, 0:5, :, :] = textures_tmp[:, 0:5, :, :].clamp(-1, 1)
-        textures[:,   5, :, :] = textures_tmp[:,   5, :, :].clamp(-0.5, 0.5)
-        textures[:, 6:9, :, :] = textures_tmp[:, 6:9, :, :].clamp(-1, 1)
-        return textures
+    One can choose whether to generate the layer-wise style codes.
 
-    def optim(self, epochs, lr, svbrdf_obj, optim_light):
-        tmp_name = str(datetime.now()).replace(" ", "-").replace(":", "-").replace(".", "-")
-        tmp_dir = svbrdf_obj.optimize_dir / "tmp" / tmp_name
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+    Args:
+      latent_codes: Input latent codes for image synthesis.
+      latent_space_type: Type of latent space to which the latent codes belong.
+        Only [`z`, `w`, `wp`] are supported. Case insensitive. (default: `z`)
+      generate_style: Whether to generate the layer-wise style codes. (default:
+        False)
+      generate_image: Whether to generate the final image synthesis. (default:
+        True)
 
-        total_epochs, l_epochs, n_epochs = epochs
-        cycle_epochs = l_epochs + n_epochs
+    Returns:
+      A dictionary whose values are raw outputs from the generator.
+    """
+    if not isinstance(latent_codes, np.ndarray):
+      raise ValueError(f'Latent codes should be with type `numpy.ndarray`!')
 
-        if optim_light:
-            svbrdf_obj.cl[2] = self.gradient(svbrdf_obj.cl[2])
+    results = {}
 
-        loss_image_list = []
-        loss_feature_list = []
-        pbar = tqdm.trange(total_epochs)
-        for epoch in pbar:
-            # choose which variables to optimize
-            epoch_tmp = epoch % cycle_epochs
-            if int(epoch_tmp / l_epochs) == 0:  # optimize latent w+
-                if optim_light:
-                    self.optimizer = th.optim.Adam([self.latent] + [svbrdf_obj.cl[2]], lr=lr, betas=(0.9, 0.999))
-                else:    
-                    self.optimizer = th.optim.Adam([self.latent], lr=lr, betas=(0.9, 0.999))
-                which_to_optimize = "L"
-            else:  # optimize nosie
-                if optim_light:
-                    self.optimizer = th.optim.Adam(globalvar.noises + [svbrdf_obj.cl[2]], lr=lr, betas=(0.9, 0.999))
-                else:
-                    self.optimizer = th.optim.Adam(globalvar.noises, lr=lr, betas=(0.9, 0.999))
-                which_to_optimize = "N"
+    latent_space_type = latent_space_type.lower()
+    # Generate from Z space.
+    if latent_space_type == 'z':
+      if not (len(latent_codes.shape) == 2 and
+              0 < latent_codes.shape[0] <= self.batch_size and
+              latent_codes.shape[1] == self.z_space_dim):
+        raise ValueError(f'Latent codes should be with shape [batch_size, '
+                         f'latent_space_dim], where `batch_size` no larger '
+                         f'than {self.batch_size}, and `latent_space_dim` '
+                         f'equal to {self.z_space_dim}!\n'
+                         f'But {latent_codes.shape} received!')
+      zs = torch.from_numpy(latent_codes).type(torch.FloatTensor)
+      zs = zs.to(self.run_device)
+      ws = self.net.mapping(zs)
+      wps = self.net.truncation(ws)
+      results['z'] = latent_codes
+      results['w'] = self.get_value(ws)
+      results['wp'] = self.get_value(wps)
+    # Generate from W space.
+    elif latent_space_type == 'w':
+      if not (len(latent_codes.shape) == 2 and
+              0 < latent_codes.shape[0] <= self.batch_size and
+              latent_codes.shape[1] == self.w_space_dim):
+        raise ValueError(f'Latent codes should be with shape [batch_size, '
+                         f'w_space_dim], where `batch_size` no larger than '
+                         f'{self.batch_size}, and `w_space_dim` equal to '
+                         f'{self.w_space_dim}!\n'
+                         f'But {latent_codes.shape} received!')
+      ws = torch.from_numpy(latent_codes).type(torch.FloatTensor)
+      ws = ws.to(self.run_device)
+      wps = self.net.truncation(ws)
+      results['w'] = latent_codes
+      results['wp'] = self.get_value(wps)
+    # Generate from W+ space.
+    elif latent_space_type == 'wp':
+      if not (len(latent_codes.shape) == 3 and
+              0 < latent_codes.shape[0] <= self.batch_size and
+              latent_codes.shape[1] == self.num_layers and
+              latent_codes.shape[2] == self.w_space_dim):
+        raise ValueError(f'Latent codes should be with shape [batch_size, '
+                         f'num_layers, w_space_dim], where `batch_size` no '
+                         f'larger than {self.batch_size}, `num_layers` equal '
+                         f'to {self.num_layers}, and `w_space_dim` equal to '
+                         f'{self.w_space_dim}!\n'
+                         f'But {latent_codes.shape} received!')
+      wps = torch.from_numpy(latent_codes).type(torch.FloatTensor)
+      wps = wps.to(self.run_device)
+      results['wp'] = latent_codes
+    else:
+      raise ValueError(f'Latent space type `{latent_space_type}` is invalid!')
 
-            # compute renderings
-            if optim_light:
-                self.renderer_obj.update_light(svbrdf_obj.cl[2])
-            textures = self.latent_to_textures(self.latent)
-            rendereds = self.renderer_obj.eval(textures)
+    if generate_style:
+      for i in range(self.num_layers - 1):
+        style = self.net.synthesis.__getattr__(f'layer{i}').style(wps[:, i, :])
+        results[f'style{i:02d}'] = self.get_value(style)
+      style = self.net.synthesis.__getattr__(
+          f'output{i // 2}').style(wps[:, i + 1, :])
+      results[f'style{i + 1:02d}'] = self.get_value(style)
 
-            # compute loss
-            loss = 0
-            loss_image = self.compute_image_loss(rendereds)
-            loss_image_list.append(loss_image.item())
-            loss += loss_image
+    if generate_image:
+      images = self.net.synthesis(wps)
+      results['image'] = self.get_value(images)
 
-            loss_feature = self.compute_feature_loss(rendereds, which_to_optimize) * 0.1
-            loss_feature_list.append(loss_feature.item())
-            loss += loss_feature
+    if self.use_cuda:
+      torch.cuda.empty_cache()
 
-            pbar.set_postfix({"Loss": loss.item(), "Light": [int(svbrdf_obj.cl[2][0].item()), int(svbrdf_obj.cl[2][1].item()), int(svbrdf_obj.cl[2][2].item())]})
+    return results
 
-            # optimize
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+  def synthesize(self,
+                 latent_codes,
+                 latent_space_type='z',
+                 generate_style=False,
+                 generate_image=True):
+    return self.batch_run(latent_codes,
+                          lambda x: self._synthesize(
+                              x,
+                              latent_space_type=latent_space_type,
+                              generate_style=generate_style,
+                              generate_image=generate_image))
 
-            # save process
-            if (epoch + 1) % 200 == 0 or epoch == 0 or epoch == (total_epochs - 1):
-                tmp_this_dir = tmp_dir / f"{epoch + 1}"
-                tmp_this_dir.mkdir(parents=True, exist_ok=True)
+  def interpolate(self, w1, w2, alpha):
+    """
+    Linearly interpolates between two latent vectors in W or W+ space.
 
-                self.save_loss([loss_image_list, loss_feature_list], ["image loss", "feature loss"], tmp_dir / "loss.jpg", total_epochs)
+    Args:
+        w1: First latent vector (numpy array or tensor).
+        w2: Second latent vector (numpy array or tensor).
+        alpha: Interpolation factor (float, 0 to 1).
 
-                th.save(self.latent, tmp_this_dir / "optim_latent.pt")
-                th.save(globalvar.noises, tmp_this_dir / "optim_noise.pt")
+    Returns:
+        Interpolated latent vector (same format as inputs).
+    """
+    if isinstance(w1, np.ndarray):
+        return (1 - alpha) * w1 + alpha * w2
+    elif isinstance(w1, torch.Tensor):
+        return (1 - alpha) * w1 + alpha * w2
+    else:
+        raise ValueError("Inputs must be numpy arrays or torch tensors.")
 
-                textures = self.latent_to_textures(self.latent)
-                svbrdf_obj.save_textures_th(textures, tmp_this_dir)
+  def synthesize_interpolated(self, w1, w2, steps=10, latent_space_type='wp'):
+    """
+    Synthesizes a sequence of images by interpolating between two latent vectors.
 
-                rendereds = self.renderer_obj.eval(textures)
-                svbrdf_obj.save_images_th(rendereds, tmp_this_dir)
+    Args:
+        w1: First latent vector (numpy array or tensor).
+        w2: Second latent vector (numpy array or tensor).
+        steps: Number of interpolation steps.
+        latent_space_type: Latent space type (`w` or `wp`).
 
-        self.textures = textures
-        self.loss = loss.item()
-        self.loss_image = loss_image.item()
-        th.save(self.latent, 'final_latent.pt')
+    Returns:
+        A list of synthesized images.
+    """
+    alpha_values = np.linspace(0, 1, steps)
+    images = []
+    for alpha in alpha_values:
+        w_interp = self.interpolate(w1, w2, alpha)
+        image = self._synthesize(w_interp, latent_space_type=latent_space_type)
+        images.append(image['image'])  # Extract synthesized image.
+    return images
 
-    def _download_checkpoint(self, ckp_path, url):
-        """Download the checkpoint if it doesn't exist."""
-        # Create directory if it doesn't exist
-        Path(ckp_path).parent.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            response = requests.get(url, stream=True)
-            response.raise_for_status()
-            
-            # Get total file size
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 1024  # 1 KB
+  def load_latent_vectors(self, file_path):
+      """
+      Loads latent vectors from a .pt file.
 
-            # Download with progress bar
-            with open(ckp_path, 'wb') as f, tqdm.tqdm(
-                desc="Downloading checkpoint",
-                total=total_size,
-                unit='iB',
-                unit_scale=True,
-                unit_divisor=1024,
-            ) as pbar:
-                for data in response.iter_content(block_size):
-                    size = f.write(data)
-                    pbar.update(size)
-                    
-            print(f"Successfully downloaded checkpoint to {ckp_path}")
-            
-        except Exception as e:
-            print(f"Error downloading checkpoint: {e}")
-            if os.path.exists(ckp_path):
-                os.remove(ckp_path)  # Remove partial download
-            raise
+      Args:
+          file_path: Path to the .pt file.
+
+      Returns:
+          A tuple (w1, w2), the loaded latent vectors.
+      """
+      latent_data = torch.load(file_path, map_location='cpu')
+      return latent_data
