@@ -329,3 +329,20 @@ class StyleGAN2Generator(BaseGenerator):
         image = self._synthesize(w_interp, latent_space_type=latent_space_type)
         images.append(image['image'])  # Extract synthesized image.
     return images
+
+def load_latent_vectors(self, file_path):
+    """
+    Loads latent vectors from a .pt file.
+
+    Args:
+        file_path: Path to the .pt file.
+
+    Returns:
+        A tuple (w1, w2), the loaded latent vectors.
+    """
+    latent_data = torch.load(file_path)
+    if 'w1' not in latent_data or 'w2' not in latent_data:
+        raise ValueError("The .pt file must contain keys 'w1' and 'w2'.")
+    w1 = latent_data['w1']
+    w2 = latent_data['w2']
+    return w1, w2
