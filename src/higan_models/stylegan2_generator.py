@@ -289,3 +289,43 @@ class StyleGAN2Generator(BaseGenerator):
                               latent_space_type=latent_space_type,
                               generate_style=generate_style,
                               generate_image=generate_image))
+
+  def interpolate(self, w1, w2, alpha):
+    """
+    Linearly interpolates between two latent vectors in W or W+ space.
+
+    Args:
+        w1: First latent vector (numpy array or tensor).
+        w2: Second latent vector (numpy array or tensor).
+        alpha: Interpolation factor (float, 0 to 1).
+
+    Returns:
+        Interpolated latent vector (same format as inputs).
+    """
+    if isinstance(w1, np.ndarray):
+        return (1 - alpha) * w1 + alpha * w2
+    elif isinstance(w1, torch.Tensor):
+        return (1 - alpha) * w1 + alpha * w2
+    else:
+        raise ValueError("Inputs must be numpy arrays or torch tensors.")
+
+  def synthesize_interpolated(self, w1, w2, steps=10, latent_space_type='wp'):
+    """
+    Synthesizes a sequence of images by interpolating between two latent vectors.
+
+    Args:
+        w1: First latent vector (numpy array or tensor).
+        w2: Second latent vector (numpy array or tensor).
+        steps: Number of interpolation steps.
+        latent_space_type: Latent space type (`w` or `wp`).
+
+    Returns:
+        A list of synthesized images.
+    """
+    alpha_values = np.linspace(0, 1, steps)
+    images = []
+    for alpha in alpha_values:
+        w_interp = self.interpolate(w1, w2, alpha)
+        image = self._synthesize(w_interp, latent_space_type=latent_space_type)
+        images.append(image['image'])  # Extract synthesized image.
+    return images
