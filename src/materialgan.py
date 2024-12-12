@@ -9,7 +9,7 @@ import tqdm
 import requests
 from pathlib import Path
 from datetime import datetime
-
+from torchvision.utils import save_image
 from .descriptor import VGGLoss
 from .globalvar import init_global_noise
 from . import globalvar
@@ -90,6 +90,24 @@ class MaterialGANOptim(Optim):
 
     def latent_to_textures(self, latent):
         textures_tmp = self.net_obj.net.synthesis(latent)
+        # Paths to the .pt files for w1 and w2.
+        w1_file_path = 'w1.pt'
+        w2_file_path = 'w2.pt'
+
+        # Load the latent vectors.
+        w1 = load_latent_vectors(w1_file_path)
+        w2 = load_latent_vectors(w2_file_path)
+
+        # Ensure the latent vectors are on the same device as the generator.
+        w1 = w1.to(generator.run_device)
+        w2 = w2.to(generator.run_device)
+
+        # Generate interpolated images.
+        interpolated_images = generator.synthesize_interpolated(w1, w2, steps=10)
+
+        # Save or display the images.
+        for i, img in enumerate(interpolated_images):
+            save_image(img, f'interpolated_{i}.png')  # Save each image.
         # Option 1:
         # self.textures = textures.clamp(-1,1)
         # Option 2:
