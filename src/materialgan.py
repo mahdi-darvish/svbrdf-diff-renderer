@@ -102,6 +102,9 @@ class MaterialGANOptim(Optim):
         return normal / (normal.norm(2.0, 1, keepdim=True))
 
     def latent_to_textures(self, latent):
+        # Create a folder to save RGB images
+        output_folder = "final_rgb_images"
+        os.makedirs(output_folder, exist_ok=True)
         textures_tmp = self.net_obj.net.synthesis(latent)
         # Paths to the .pt files for w1 and w2.
         w1_file_path = 'w1.pt'
@@ -117,7 +120,7 @@ class MaterialGANOptim(Optim):
         w1 = w1.detach().cpu().numpy()
         w2 = w2.detach().cpu().numpy()
         # Generate interpolated images.
-        interpolated_images = self.net_obj.synthesize_interpolated(w1, w2, steps=10)
+        interpolated_images = self.net_obj.synthesize_interpolated(w1, w2, steps=100)
 
         # Save or display the images.
         for i, img in enumerate(interpolated_images):
@@ -135,11 +138,19 @@ class MaterialGANOptim(Optim):
             specular = self.th_to_np(specular_th.squeeze().permute(1, 2, 0))
             roughness = self.th_to_np(roughness_th.squeeze())
 
-            print("[DONE:SvbrdfIO] Save textures")
-            imwrite(normal, "nom.png", "normal")
-            imwrite(diffuse, "dif.png", "srgb")
-            imwrite(specular, "spe.png", "srgb")
-            imwrite(roughness, "rgh.png", "rough")
+            final_rgb = (diffuse + specular) / 2  # Example: average combination
+            final_rgb = final_rgb.clip(0, 1)  # Ensure values are in the valid range [0, 1]
+
+
+            print(f"[DONE:SvbrdfIO] Saving textures for image {i + 1}")
+            imwrite(normal, f"normal_{i + 1}.png", "normal")
+            imwrite(diffuse, f"diffuse_{i + 1}.png", "srgb")
+            imwrite(specular, f"specular_{i + 1}.png", "srgb")
+            imwrite(roughness, f"roughness_{i + 1}.png", "rough")
+
+            # Save the final RGB image in the output folder
+            rgb_output_path = os.path.join(output_folder, f"rgb_{i + 1}.png")
+            imwrite(final_rgb, rgb_output_path, "srgb")
         # Option 1:
         # self.textures = textures.clamp(-1,1)
         # Option 2:

@@ -201,7 +201,6 @@ class StyleGAN2Generator(BaseGenerator):
         False)
       generate_image: Whether to generate the final image synthesis. (default:
         True)
-
     Returns:
       A dictionary whose values are raw outputs from the generator.
     """
