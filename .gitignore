@@ -137,3 +137,4 @@ data/yellow_box-17.0-0.1/target
 data/yellow_box-17.0-0.1/optim_latent
 data/yellow_box-17.0-0.1/optim_pixel
 data/yellow_box-17.0-0.1/*.json
+content_to_ignore
