@@ -7,16 +7,14 @@ import numpy as np
 import torch as th
 import tqdm
 import requests
-import torch
 from pathlib import Path
 from datetime import datetime
-from torchvision.utils import save_image
+
 from .descriptor import VGGLoss
 from .globalvar import init_global_noise
 from . import globalvar
 from .optimization import Optim
 from .higan_models.stylegan2_generator import StyleGAN2Generator
-from .imageio import imread, imwrite, img9to1, tex4to1
 # We use the generator of StyleGAN2 from higan (https://github.com/genforce/higan)
 
 
@@ -90,67 +88,8 @@ class MaterialGANOptim(Optim):
             print("[ERROR:MaterialGANOptim] To compute feature loss, a flag is needed, 'L' or 'N'")
             exit()
 
-    def th_to_np(self, arr):
-        return arr.detach().cpu().numpy()
-
-    def reconstruct_normal(self, texture):
-        normal_x  = texture[:, 0, :, :].clamp(-1, 1)
-        normal_y  = texture[:, 1, :, :].clamp(-1, 1)
-        normal_xy = (normal_x**2 + normal_y**2).clamp(0, 1)
-        normal_z  = (1 - normal_xy).sqrt()
-        normal    = th.stack((normal_x, normal_y, normal_z), 1)
-        return normal / (normal.norm(2.0, 1, keepdim=True))
-
     def latent_to_textures(self, latent):
-        # Create a folder to save RGB images
-        output_folder = "final_rgb_images"
-        os.makedirs(output_folder, exist_ok=True)
         textures_tmp = self.net_obj.net.synthesis(latent)
-        # Paths to the .pt files for w1 and w2.
-        w1_file_path = 'w1.pt'
-        w2_file_path = 'w2.pt'
-
-        # Load the latent vectors.
-        w1 = self.net_obj.load_latent_vectors(w1_file_path)
-        w2 = self.net_obj.load_latent_vectors(w2_file_path)
-
-        # Ensure the latent vectors are on the same device as the generator.
-        w1 = w1.to(self.net_obj.run_device)
-        w2 = w2.to(self.net_obj.run_device)
-        w1 = w1.detach().cpu().numpy()
-        w2 = w2.detach().cpu().numpy()
-        # Generate interpolated images.
-        interpolated_images = self.net_obj.synthesize_interpolated(w1, w2, steps=100)
-
-        # Save or display the images.
-        for i, img in enumerate(interpolated_images):
-            img_tensor = torch.from_numpy(img).float()
-
-            # Save the image
-            diffuse_th = (img_tensor[:, 0:3, :, :] + 1) / 2
-            normal_th = img_tensor[:, 3:5, :, :]
-            roughness_th = (img_tensor[:, 5, :, :] + 1) / 2
-            specular_th = (img_tensor[:, 6:9, :, :] + 1) / 2
-            normal_th = self.reconstruct_normal(normal_th)
-
-            normal = self.th_to_np(normal_th.squeeze().permute(1, 2, 0))
-            diffuse = self.th_to_np(diffuse_th.squeeze().permute(1, 2, 0))
-            specular = self.th_to_np(specular_th.squeeze().permute(1, 2, 0))
-            roughness = self.th_to_np(roughness_th.squeeze())
-
-            final_rgb = (diffuse + specular) / 2  # Example: average combination
-            final_rgb = final_rgb.clip(0, 1)  # Ensure values are in the valid range [0, 1]
-
-
-            print(f"[DONE:SvbrdfIO] Saving textures for image {i + 1}")
-            imwrite(normal, f"normal_{i + 1}.png", "normal")
-            imwrite(diffuse, f"diffuse_{i + 1}.png", "srgb")
-            imwrite(specular, f"specular_{i + 1}.png", "srgb")
-            imwrite(roughness, f"roughness_{i + 1}.png", "rough")
-
-            # Save the final RGB image in the output folder
-            rgb_output_path = os.path.join(output_folder, f"rgb_{i + 1}.png")
-            imwrite(final_rgb, rgb_output_path, "srgb")
         # Option 1:
         # self.textures = textures.clamp(-1,1)
         # Option 2:
@@ -232,7 +171,6 @@ class MaterialGANOptim(Optim):
         self.textures = textures
         self.loss = loss.item()
         self.loss_image = loss_image.item()
-        th.save(self.latent, 'final_latent.pt')
 
     def _download_checkpoint(self, ckp_path, url):
         """Download the checkpoint if it doesn't exist."""
