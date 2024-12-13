@@ -137,4 +137,7 @@ data/yellow_box-17.0-0.1/target
 data/yellow_box-17.0-0.1/optim_latent
 data/yellow_box-17.0-0.1/optim_pixel
 data/yellow_box-17.0-0.1/*.json
-content_to_ignore
+data/wood_carpet-16.51-0.1/target
+data/wood_carpet-16.51-0.1/optim_latent
+data/wood_carpet-16.51-0.1/optim_pixel
+data/wood_carpet-16.51-0.1/*.json

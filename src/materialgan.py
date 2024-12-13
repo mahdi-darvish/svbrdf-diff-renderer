@@ -153,7 +153,7 @@ class MaterialGANOptim(Optim):
             self.optimizer.step()
 
             # save process
-            if (epoch + 1) % 200 == 0 or epoch == 0 or epoch == (total_epochs - 1):
+            if epoch == (total_epochs - 1):
                 tmp_this_dir = tmp_dir / f"{epoch + 1}"
                 tmp_this_dir.mkdir(parents=True, exist_ok=True)
 
